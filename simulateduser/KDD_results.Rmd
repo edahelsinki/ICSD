@@ -1,0 +1,120 @@
+---
+title: "Simulated user experiments for <i>Interactive Causal Structure Discovery in Earth System Sciences</i>"
+output: html_notebook
+---
+
+```{r, include=FALSE}
+#' THIS SOURCE CODE IS SUPPLIED “AS IS” WITHOUT WARRANTY OF ANY KIND, AND ITS
+#' AUTHOR AND THE JOURNAL OF MACHINE LEARNING RESEARCH (JMLR) AND JMLR’S
+#' PUBLISHERS AND DISTRIBUTORS, DISCLAIM ANY AND ALL WARRANTIES, INCLUDING BUT
+#' NOT LIMITED TO ANY IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A
+#' PARTICULAR PURPOSE, AND ANY WARRANTIES OR NON INFRINGEMENT. THE USER ASSUMES
+#' ALL LIABILITY AND RESPONSIBILITY FOR USE OF THIS SOURCE CODE, AND NEITHER THE
+#' AUTHOR NOR JMLR, NOR JMLR’S PUBLISHERS AND DISTRIBUTORS, WILL BE LIABLE FOR
+#' DAMAGES OF ANY KIND RESULTING FROM ITS USE. Without limiting the generality
+#' of the foregoing, neither the author, nor JMLR, nor JMLR’s publishers and
+#' distributors, warrant that the Source Code will be error-free, will operate
+#' without interruption, or will meet the needs of the user.
+
+library(RColorBrewer)
+library(data.table)
+library(ggplot2)
+
+
+COLORS <- brewer.pal(7, 'Set2')
+```
+
+## Functions for plotting results
+```{r}
+plot.results <- function (results, nodes=c(5, 10), noise=0.01, unknowns=c(0, 0.33), ns=c(50, 100000)) {
+  results <- data.frame(results[(results[, 'noise'] == noise) & (results[, 'unknown'] %in% unknowns) & (results[, 'n'] %in% ns), ])
+  results$k[results$k == 1/3] <- 0.33
+
+  # Compare average score of true model to average score of found model
+  agg <- aggregate(results, list(results$n, results$nodes), mean)[, c('nodes', 'n', 'target.score', 'true.score')]
+  colnames(agg) <- c('Nodes', 'Sample size', 'Final score', 'True score')
+  print(agg)
+
+  agg.res <- aggregate(results[, c('shd')],
+                       list(results$n, results$k, results$nodes, results$unknown),
+                       function (x) c(mean=mean(x), sd=sd(x)))
+  agg.start <- aggregate(results[, 'start.shd'],
+                         list(results$n, results$nodes, results$unknown),
+                         function (x) c(mean=mean(x), sd=sd(x)))
+
+  data <- data.frame(n=agg.res$Group.1, k=agg.res$Group.2, nodes=agg.res$Group.3, unknown=agg.res$Group.4,
+                     mean=agg.res$x[, 'mean'], sd=agg.res$x[, 'sd'])
+  data.s <- data.frame(n=agg.start$Group.1, nodes=agg.start$Group.2, unknown=agg.start$Group.3,
+                     mean=agg.start$x[, 'mean'], sd=agg.start$x[, 'sd'])
+
+  data.m <- merge(data, data.s, by=c('n', 'nodes', 'unknown'), suffixes=c('.shd', '.start'))
+
+  for(grp in unique(data$nodes)) {
+    res <- data.m[data.m$nodes == grp, ]
+
+    title <- sprintf('Mean SHD to ground truth, %d nodes', res[[1, 'nodes']])
+    pd <- position_dodge(0.02)
+    p <- ggplot(res, aes(x=k, y=mean.shd, color=as.factor(n), group=n)) +
+      geom_line(aes(x=k, y=mean.start), linetype='dotted') +
+      geom_line(position=pd) +
+      geom_errorbar(aes(ymin=mean.shd - sd.shd, ymax=mean.shd + sd.shd), width=0.02, position=pd) +
+      scale_color_manual(values=c('red', 'black'), labels=c('50', '100000')) +
+      theme_minimal() +
+      facet_grid(rows=vars(unknown)) +
+      scale_x_continuous(trans='log2', breaks=c(0.33, 0.34, 0.37, 0.4, 0.5)) +
+      labs(title=title, color='Sample size', y='SHD') +
+      theme(legend.position = 'top', axis.text.x = element_text(angle=45), text=element_text(size=16))
+
+    tmp <- ggplot_gtable(ggplot_build(p))
+    leg <- which(sapply(tmp$grobs, function(x) x$name) == "guide-box")
+    legend <- tmp$grobs[[leg]]
+
+    if (grp == 5) p <- p + scale_y_continuous(breaks=seq(0, 10, 2))
+
+    print(p)
+    ggsave(sprintf('../figures/shd_single_nodes%d.pdf', res[[1, 'nodes']]), p + theme(legend.position = 'none'), width=6, height=7)
+    ggsave('../figures/shd_single_nodes_legend.pdf', legend, width=10, height=1)
+  }
+}
+
+
+plot.distances <- function (distances, nodes=7, noise=0.01, unknown=0.33, n=1000) {
+  distances <- as.data.frame(distances)
+  distances <- distances[(distances[, 'n'] == n)
+                         & (distances[, 'nodes'] == nodes)
+                         & (distances[, 'noise'] == noise)
+                         & (distances[, 'unknown'] == unknown), ]
+  distances$k[distances$k == 1/3] <- 0.33
+
+  print(ggplot(reshape2::melt(distances, id.vars=c('nodes', 'noise', 'unknown', 'n', 'k')), aes(x=k, y=value)) +
+    geom_bin2d() +
+    theme_minimal() +
+    scale_x_continuous(trans='log2', breaks=c(0.328, 0.342, 0.372, 0.398, 0.497), labels=c(0.33, 0.34, 0.37, 0.4, 0.5)) +
+    scale_fill_gradient(low=COLORS[2], high='black') +
+    labs(title='Structural Hamming distance between results from different starting points', y='SHD', fill='Count'))
+
+  ggsave(sprintf('../figures/dist_Nodes%d.Noise%.02f.Unknown%.02f.Sample%d.pdf', nodes, noise, unknown, n),
+        width=7, height=3, device='pdf')
+}
+
+```
+
+# Experiment 1: Plot results for single starting points
+```{r}
+file.list <- paste0('single/', list.files(path='single/'))
+all.results <- c()
+invisible(sapply(file.list, function (f) all.results <<- rbind(all.results, readRDS(f))))
+
+plot.results(all.results)
+```
+
+
+# Experiment 2: Plot pairwise distances for multiple starting points
+```{r}
+file.list <- paste0('distances/', list.files(path='distances/'))
+all.distances <- c()
+invisible(sapply(file.list, function (f) all.distances <<- rbind(all.distances, readRDS(f))))
+
+plot.distances(all.distances)
+```
+

@@ -1,0 +1,325 @@
+---
+title: "Use cases for <i>Interactive Causal Structure Discovery in Earth System Sciences</i>"
+output: html_notebook
+---
+
+```{r, include=FALSE}
+#' THIS SOURCE CODE IS SUPPLIED “AS IS” WITHOUT WARRANTY OF ANY KIND, AND ITS
+#' AUTHOR AND THE JOURNAL OF MACHINE LEARNING RESEARCH (JMLR) AND JMLR’S
+#' PUBLISHERS AND DISTRIBUTORS, DISCLAIM ANY AND ALL WARRANTIES, INCLUDING BUT
+#' NOT LIMITED TO ANY IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A
+#' PARTICULAR PURPOSE, AND ANY WARRANTIES OR NON INFRINGEMENT. THE USER ASSUMES
+#' ALL LIABILITY AND RESPONSIBILITY FOR USE OF THIS SOURCE CODE, AND NEITHER THE
+#' AUTHOR NOR JMLR, NOR JMLR’S PUBLISHERS AND DISTRIBUTORS, WILL BE LIABLE FOR
+#' DAMAGES OF ANY KIND RESULTING FROM ITS USE. Without limiting the generality
+#' of the foregoing, neither the author, nor JMLR, nor JMLR’s publishers and
+#' distributors, warrant that the Source Code will be error-free, will operate
+#' without interruption, or will meet the needs of the user.
+
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(cache = T)
+knitr::opts_chunk$set(cache.extra = knitr::rand_seed)
+
+set.seed(125)
+
+setwd('../code/')
+source('global.R')
+```
+
+## Helper functions for plotting results
+```{r, fig.width=12, fig.height=3}
+palette <- brewer.pal(3, 'Set2')
+
+
+plot.difference.graph <- function (adj.m, compare.adj.m, tag) {
+  par(mar=rep(0,4), cex=2)
+
+  graph.a <- graph_from_adjacency_matrix(adj.m)
+  varnames <- colnames(adj.m)
+  missing.edges <- as.vector(apply(which(adj.m == 0 & t(adj.m) == 0 & compare.adj.m == 1, arr.ind=T), 1, function (idx) c(varnames[idx[1]], varnames[idx[2]])))
+  graph.a <- add_edges(graph.a, missing.edges)
+
+  colors <- c()
+  if (sum(adj.m) > 0)
+    colors <- apply(which(t(adj.m) == 1, arr.ind=T), 1, function (idx) {
+      if (t(compare.adj.m)[idx[1], idx[2]] == 1) 'black'
+      else if (t(compare.adj.m)[idx[2], idx[1]] == 1) palette[3]
+      else palette[2]
+    })
+
+  plot(
+    graph.a, layout=layout_in_circle(graph.a), vertex.size=70, vertex.color=NA, edge.width=5,
+    edge.color=c(colors, rep(palette[1], length(missing.edges))), vertex.label.family='sans',
+    vertex.label.color='black', vertex.width=3.5,
+    edge.lty=c(rep(1, length(colors)), rep(2, length(missing.edges))), margin=rep(0.1, 4)
+  )
+
+  text(-1.2, 1.1, tag, cex=1.5)
+}
+
+
+plot.strip <- function (graphs, fn, legend=F) {
+  rows <- ceiling(length(graphs) / 5)
+  pdf(file=paste0(fn, '.pdf'), width=20, height=4 * rows)
+  par(mfrow=c(rows, 5))
+
+  invisible(sapply(seq_along(graphs), function (i) {
+    if (i < length(graphs)) plot.difference.graph(graphs[[i]], graphs[[i + 1]], tag=paste0(i, ')'))
+    else plot.difference.graph(graphs[[i]], graphs[[i]], tag=paste0(i, ')'))
+  }))
+
+  if (legend) {
+    plot(NULL, xaxt='n', yaxt='n', bty='n', xlim=0:1, ylim=0:1, ylab='', xlab='')
+    legend('center', legend=c('Reversal', 'Addition'), col=palette[c(3, 1)], lty=c(1,2), lwd=8, bty='n', seg.len=3)
+  }
+
+  dev.off()
+}
+
+plot.cv <- function (graphs, data, k, fn, last.fold=NA, legend=F) {
+  if (!is.na(last.fold)) folds <- c(cut(seq(nrow(data) - last.fold), k - 1, labels=F), rep(k, last.fold))
+  else folds <- cut(seq(nrow(data)), k, labels=F)
+
+  titles <- lapply(graphs, function (g) {
+    sapply(seq(k), function (i) {
+      tr.idx <- which(folds != i)
+      calc.mean.R2(data, tr.idx, g, train=T)
+    })
+  })
+
+  plot.strip(graphs, fn, legend=legend)
+
+  titles <- reshape2::melt(titles)
+  colnames(titles) <- c('type', 'fold', 'value', 'step')
+  titles
+}
+
+plot.r2 <- function (data, legend=F) {
+  data$size <- 0.5
+  agg.d <- aggregate(data$value, list(data$type, data$step), mean)
+  data <- rbind(data,
+                data.frame(type=agg.d$Group.1, fold=rep(0, nrow(agg.d)),
+                           value=agg.d$x, step=agg.d$Group.2, size=rep(1, nrow(agg.d))))
+  steps <- seq(1, max(data$step))
+
+  p <- ggplot(data, aes(x=step, y=value, color=type)) +
+    geom_line(aes(group=interaction(fold, type), size=size, alpha=size)) +
+    labs(x='Step', y='Mean adjusted R-squared') +
+    scale_color_manual(name='Data', values=c('red', 'black')) +
+    scale_size_continuous(name='Type', breaks=c(0.5, 1), labels=c('Fold', 'Mean'), range=c(0.5, 1)) +
+    scale_alpha_continuous(name='Type', breaks=c(0.5, 1), labels=c('Fold', 'Mean'), range=c(0.5, 1)) +
+    scale_x_continuous(breaks=steps) +
+    theme_minimal() +
+    theme(legend.position='top', text = element_text(size=20))
+
+  if (legend) {
+    tmp <- ggplot_gtable(ggplot_build(p))
+    leg <- which(sapply(tmp$grobs, function(x) x$name) == "guide-box")
+    ggsave('../figures/R2_legend.pdf', tmp$grobs[[leg]], width=10, height=1)
+  }
+
+  p + theme(legend.position = 'none')
+}
+```
+
+## Helper functions for finding a path of single edits between two graphs
+```{r}
+find.model <- function (data, correct) {
+  graphs <- list()
+  current <<- initcurrent(data=data)
+
+  graphs[[1]] <- current$edit.mtx
+
+  rev.edges <- which(t(current$edit.mtx) == 1 & correct == 1, arr.ind=T)
+
+  if (nrow(rev.edges) != 0)
+    invisible(apply(rev.edges, 1, function (edge) {
+      reverse.edge(edge[1], edge[2])
+      graphs <<- append(graphs, list(current$edit.mtx))
+    }))
+
+  add.edges <- which(current$edit.mtx == 0 & correct == 1, arr.ind=T)
+
+  if (nrow(add.edges) != 0)
+    invisible(apply(add.edges, 1, function (edge) {
+      add.edge(edge[2], edge[1])
+      graphs <<- append(graphs, list(current$edit.mtx))
+    }))
+
+  del.edges <- which(current$edit.mtx == 1 & correct == 0, arr.ind=T)
+
+  if (nrow(del.edges) != 0)
+    invisible(apply(del.edges, 1, function (edge) {
+      delete.edge(edge[1], edge[2])
+      graphs <<- append(graphs, list(current$edit.mtx))
+    }))
+
+  graphs
+}
+
+find.plot.cv <- function (data, correct, k, fn, last.fold=NA, legend=F) {
+  graphs <- find.model(data, correct)
+  plot.cv(graphs, data, k, fn, last.fold=last.fold, legend=legend)
+}
+
+```
+
+## Load data
+```{r}
+vars <- c('Rg', 'T', 'NEE', 'VPD', 'H', 'LE')
+correct <- matrix(0, 6, 6, dimnames=list(vars, vars))
+correct[cbind(c(1,1,1,1,2,2,4,4), c(2,3,5,6,3,4,3,6))] <- 1
+
+hyy <- read.csv('../data/FI_HYY_Preprocessed_2014.csv')
+hyy.apr <- hyy[hyy$MONTH == 4, vars]
+
+hyy.long <- read.csv('../data/FI_HYY_Preprocessed_2013-2015.csv')
+hyy.l.apr <- hyy.long[hyy.long$MONTH == 4, vars]
+hyy.apr.may <- hyy.long[hyy.long$MONTH %in% c(4, 5), vars]
+hyy.l.aug <- hyy.long[hyy.long$MONTH == 8, vars]
+
+hyy.3apr.1aug <- rbind(hyy.l.apr, hyy.l.aug[(nrow(hyy.l.aug) - 214):nrow(hyy.l.aug), ])
+```
+
+# Use Case 1:
+
+## Hyytiälä 1 year, April
+```{r}
+fn <- '../figures/expert_april14'
+titles <- find.plot.cv(hyy.apr, correct, 2, fn, legend=T)
+
+plot.r2(titles, legend=T) + ylim(NA, 1)
+ggsave(paste0(fn, '_R2.pdf'), device='pdf', height=4, width=5)
+```
+
+## Hyytiälä 3 years, April-May, 3 folds
+```{r}
+fn <- '../figures/expert_april-may_13-15_3'
+titles <- find.plot.cv(hyy.apr.may, correct, 3, fn)
+
+plot.r2(titles) + ylim(0, 1)
+ggsave(paste0(fn, '_R2.pdf'), device='pdf', height=4, width=5)
+```
+
+# Use Case 2:
+## Hyytiälä 3 years April, 1 year August, 4 folds
+```{r}
+fn <- '../figures/expert_april13-15_aug15'
+titles <- find.plot.cv(hyy.3apr.1aug, correct, 4, fn, last.fold=215)
+
+plot.r2(titles) + ylim(NA, 1) + annotate('text', 9.75, -4.4, label='August 2015')
+ggsave(paste0(fn, '_R2.pdf'), device='pdf', height=4, width=5)
+```
+
+## Hyytiälä 3 years, April 3 folds
+```{r}
+fn <- '../figures/expert_april13-15'
+titles <- find.plot.cv(hyy.l.apr, correct, 3, fn)
+
+plot.r2(titles) + ylim(-.01, 1)
+ggsave(paste0(fn, '_R2.pdf'), device='pdf', height=4, width=5)
+```
+
+# Use Case 3:
+
+## Function to compute the effect of all possible edits on the model
+```{r}
+current.state <- function (data) {
+  all.improv <- list(Add=matrix(0, length(vars), length(vars), dimnames=list(vars, vars)),
+                     Del=matrix(0, length(vars), length(vars), dimnames=list(vars, vars)),
+                     Rev=matrix(0, length(vars), length(vars), dimnames=list(vars, vars)))
+  curr.score <- 0
+
+  sapply(seq(k), function (i) {
+    tr.idx <- which(folds != i)
+    i <- calc.improvements(data, tr.idx, current$edit.mtx, current$calc.score, all=T)
+    all.improv$Add <<- all.improv$Add + i$Add
+    all.improv$Del <<- all.improv$Del + i$Del
+    all.improv$Rev <<- all.improv$Rev + i$Rev
+    curr.score <<- curr.score + current$calc.score(data, tr.idx, current$edit.mtx)
+  })
+
+  all.improv$Add <- round(all.improv$Add / k, 5)
+  all.improv$Del <- round(all.improv$Del / k, 5)
+  all.improv$Rev <- round(all.improv$Rev / k, 5)
+  curr.score <- round(curr.score / k, 5)
+
+  print(curr.score)
+  all.improv
+}
+```
+
+## April-May 2013-2015, no knowledge
+```{r}
+set.seed(123)
+data <- hyy.apr.may
+k <- 3
+folds <- cut(seq(nrow(data)), k, labels=F)
+
+graphs <- list()
+current <<- initcurrent(data=data)
+
+graphs[[1]] <- current$edit.mtx
+add.edge(3, 1)
+graphs[[2]] <- current$edit.mtx
+add.edge(2, 1)
+graphs[[3]] <- current$edit.mtx
+delete.edge(1, 4)
+graphs[[4]] <- current$edit.mtx
+add.edge(2, 5)
+graphs[[5]] <- current$edit.mtx
+reverse.edge(4, 2)
+graphs[[6]] <- current$edit.mtx
+add.edge(4, 1)
+graphs[[7]] <- current$edit.mtx
+delete.edge(5, 4)
+graphs[[8]] <- current$edit.mtx
+delete.edge(1, 2)
+graphs[[9]] <- current$edit.mtx
+reverse.edge(1, 5)
+graphs[[10]] <- current$edit.mtx
+
+filen <- '../figures/non_expert_alg'
+titles <- plot.cv(graphs, data, k, fn)
+
+plot.r2(titles) + ylim(0, 1)
+ggsave(paste0(fn, '_R2.pdf'), device='pdf', height=4, width=5)
+```
+
+## April-May 2013-2015, no knowledge, empty graph
+```{r}
+set.seed(123)
+graphs <- list()
+current <<- initcurrent(data=data)
+current$edit.mtx <- matrix(0, ncol(data), ncol(data), dimnames=list(vars, vars))
+
+graphs[[1]] <- current$edit.mtx
+add.edge(5, 1)
+graphs[[2]] <- current$edit.mtx
+add.edge(2, 4)
+graphs[[3]] <- current$edit.mtx
+add.edge(6, 3)
+graphs[[4]] <- current$edit.mtx
+add.edge(4, 1)
+graphs[[5]] <- current$edit.mtx
+add.edge(3, 1)
+graphs[[6]] <- current$edit.mtx
+add.edge(6, 4)
+graphs[[7]] <- current$edit.mtx
+add.edge(2, 5)
+graphs[[8]] <- current$edit.mtx
+add.edge(2, 3)
+graphs[[9]] <- current$edit.mtx
+add.edge(4, 3)
+graphs[[10]] <- current$edit.mtx
+add.edge(6, 1)
+graphs[[11]] <- current$edit.mtx
+
+
+filen <- '../figures/non_expert_alg'
+titles <- plot.cv(graphs, data, k, fn)
+
+plot.r2(titles) + ylim(0, 1)
+ggsave(paste0(fn, '_R2.pdf'), device='pdf', height=4, width=5)
+```
+
