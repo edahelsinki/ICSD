@@ -279,7 +279,7 @@ graphs[[9]] <- current$edit.mtx
 reverse.edge(1, 5)
 graphs[[10]] <- current$edit.mtx
 
-filen <- '../figures/non_expert_alg'
+fn <- '../figures/non_expert_alg'
 titles <- plot.cv(graphs, data, k, fn)
 
 plot.r2(titles) + ylim(0, 1)
@@ -316,7 +316,7 @@ add.edge(6, 1)
 graphs[[11]] <- current$edit.mtx
 
 
-filen <- '../figures/non_expert_alg'
+fn <- '../figures/non_expert_empty'
 titles <- plot.cv(graphs, data, k, fn)
 
 plot.r2(titles) + ylim(0, 1)
